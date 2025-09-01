@@ -4,16 +4,12 @@ import re
 import dns.resolver
 import smtplib
 import socket
-from tqdm import tqdm
 
 # ------------------------------
 # Email Validation Helpers
 # ------------------------------
 
-# Common disposable domains
 DISPOSABLE_DOMAINS = {"mailinator.com", "10minutemail.com", "guerrillamail.com", "yopmail.com"}
-
-# Common role-based prefixes
 ROLE_PREFIXES = {"admin", "info", "sales", "support", "contact", "help", "office"}
 
 def validate_regex(email: str) -> bool:
@@ -36,7 +32,6 @@ def validate_mx(domain: str) -> bool:
         return False
 
 def check_catch_all(domain: str) -> bool:
-    """Try sending query to a fake address, if accepted -> catch-all domain."""
     test_email = "thisaddressshouldnotexist123@" + domain
     try:
         records = dns.resolver.resolve(domain, 'MX')
@@ -47,12 +42,11 @@ def check_catch_all(domain: str) -> bool:
         server.mail("test@" + domain)
         code, _ = server.rcpt(test_email)
         server.quit()
-        return code == 250  # If accepted, catch-all
+        return code == 250
     except:
         return False
 
 def validate_smtp(email: str) -> bool:
-    """Verify via SMTP handshake (optional)."""
     try:
         domain = email.split('@')[1]
         records = dns.resolver.resolve(domain, 'MX')
@@ -97,7 +91,6 @@ def classify_email(email: str, use_smtp: bool = False) -> str:
 st.title("📧 Advanced Bulk Email Validator (NeverBounce Style)")
 
 uploaded_file = st.file_uploader("Upload Excel/CSV with Emails", type=["xlsx", "csv"])
-
 use_smtp = st.checkbox("Enable SMTP validation (slower, less reliable)")
 
 if uploaded_file:
@@ -107,7 +100,6 @@ if uploaded_file:
     else:
         df = pd.read_excel(uploaded_file)
 
-    # Guess column
     email_col = st.selectbox("Select Email Column", df.columns)
 
     results = []
@@ -124,8 +116,7 @@ if uploaded_file:
 
         results.append(result)
 
-        # Update progress
-        pct = int(((i+1) / total) * 100)
+        pct = int(((i + 1) / total) * 100)
         progress.progress(pct)
         status_text.text(f"Processing {i+1}/{total} emails... ({pct}%)")
 
@@ -134,6 +125,5 @@ if uploaded_file:
     st.success("✅ Validation completed!")
     st.dataframe(df.head(20))
 
-    # Download results
     csv = df.to_csv(index=False).encode('utf-8')
     st.download_button("Download Results CSV", csv, "validated_emails.csv", "text/csv")
