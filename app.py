@@ -4,111 +4,136 @@ import re
 import dns.resolver
 import smtplib
 import socket
+from tqdm import tqdm
 
-# -----------------------------
-# Email validation functions
-# -----------------------------
+# ------------------------------
+# Email Validation Helpers
+# ------------------------------
 
-def validate_regex(email):
-    """Check if email matches regex pattern."""
-    regex = r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
-    if not isinstance(email, str):
-        return False
-    return re.match(regex, email.strip()) is not None
+# Common disposable domains
+DISPOSABLE_DOMAINS = {"mailinator.com", "10minutemail.com", "guerrillamail.com", "yopmail.com"}
 
-def validate_mx(email):
-    """Check if domain has MX record."""
+# Common role-based prefixes
+ROLE_PREFIXES = {"admin", "info", "sales", "support", "contact", "help", "office"}
+
+def validate_regex(email: str) -> bool:
+    regex = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
+    return re.match(regex, email) is not None
+
+def validate_disposable(email: str) -> bool:
+    domain = email.split('@')[-1]
+    return domain.lower() in DISPOSABLE_DOMAINS
+
+def validate_role_based(email: str) -> bool:
+    prefix = email.split('@')[0].split('.')[0].lower()
+    return prefix in ROLE_PREFIXES
+
+def validate_mx(domain: str) -> bool:
     try:
-        domain = email.split('@')[-1]
         dns.resolver.resolve(domain, 'MX')
         return True
-    except Exception:
+    except:
         return False
 
-def validate_smtp(email):
-    """Check if SMTP server accepts the email (basic check)."""
+def check_catch_all(domain: str) -> bool:
+    """Try sending query to a fake address, if accepted -> catch-all domain."""
+    test_email = "thisaddressshouldnotexist123@" + domain
     try:
-        domain = email.split('@')[-1]
         records = dns.resolver.resolve(domain, 'MX')
         mx_record = str(records[0].exchange)
-        server = smtplib.SMTP(timeout=10)
+        server = smtplib.SMTP(timeout=5)
         server.connect(mx_record)
         server.helo(socket.gethostname())
-        server.mail("test@example.com")
+        server.mail("test@" + domain)
+        code, _ = server.rcpt(test_email)
+        server.quit()
+        return code == 250  # If accepted, catch-all
+    except:
+        return False
+
+def validate_smtp(email: str) -> bool:
+    """Verify via SMTP handshake (optional)."""
+    try:
+        domain = email.split('@')[1]
+        records = dns.resolver.resolve(domain, 'MX')
+        mx_record = str(records[0].exchange)
+        server = smtplib.SMTP(timeout=5)
+        server.connect(mx_record)
+        server.helo(socket.gethostname())
+        server.mail("test@" + domain)
         code, _ = server.rcpt(email)
         server.quit()
         return code == 250
-    except Exception:
+    except:
         return False
 
-# -----------------------------
+def classify_email(email: str, use_smtp: bool = False) -> str:
+    if not validate_regex(email):
+        return "Invalid"
+
+    domain = email.split('@')[-1]
+
+    if not validate_mx(domain):
+        return "Invalid"
+
+    if validate_disposable(email):
+        return "Doubtful"
+
+    if validate_role_based(email):
+        return "Doubtful"
+
+    if check_catch_all(domain):
+        return "Doubtful"
+
+    if use_smtp and not validate_smtp(email):
+        return "Doubtful"
+
+    return "Valid"
+
+
+# ------------------------------
 # Streamlit App
-# -----------------------------
+# ------------------------------
+st.title("📧 Advanced Bulk Email Validator (NeverBounce Style)")
 
-st.title("📧 Bulk Email Validator")
-st.write("Upload an Excel/CSV file containing emails. The app will validate each email in 3 steps: Regex ➝ MX Record ➝ SMTP.")
+uploaded_file = st.file_uploader("Upload Excel/CSV with Emails", type=["xlsx", "csv"])
 
-uploaded_file = st.file_uploader("Upload file", type=["csv", "xlsx"])
+use_smtp = st.checkbox("Enable SMTP validation (slower, less reliable)")
 
 if uploaded_file:
-    try:
-        if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
+    # Load data
+    if uploaded_file.name.endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
+
+    # Guess column
+    email_col = st.selectbox("Select Email Column", df.columns)
+
+    results = []
+    total = len(df)
+
+    progress = st.progress(0)
+    status_text = st.empty()
+
+    for i, email in enumerate(df[email_col]):
+        if isinstance(email, str) and "@" in email:
+            result = classify_email(email.strip(), use_smtp)
         else:
-            df = pd.read_excel(uploaded_file)
+            result = "Invalid"
 
-        # Assume column name is 'email' (case insensitive)
-        email_col = None
-        for col in df.columns:
-            if col.lower() in ["email", "emails", "mail", "e-mail"]:
-                email_col = col
-                break
+        results.append(result)
 
-        if email_col is None:
-            st.error("❌ No 'email' column found in file. Please rename your column to 'email'.")
-        else:
-            df['email'] = df[email_col].astype(str).str.strip()
+        # Update progress
+        pct = int(((i+1) / total) * 100)
+        progress.progress(pct)
+        status_text.text(f"Processing {i+1}/{total} emails... ({pct}%)")
 
-            results = []
-            progress = st.progress(0)
-            status_text = st.empty()
+    df["Validation Result"] = results
 
-            total = len(df)
-            for i, mail in enumerate(df['email']):
-                mail = str(mail).strip()
+    st.success("✅ Validation completed!")
+    st.dataframe(df.head(20))
 
-                regex_ok = validate_regex(mail)
-                mx_ok = validate_mx(mail) if regex_ok else False
-                smtp_ok = validate_smtp(mail) if mx_ok else False
-
-                if regex_ok and mx_ok and smtp_ok:
-                    status = "✅ Valid"
-                elif regex_ok or mx_ok:
-                    status = "⚠ Doubtful"
-                else:
-                    status = "❌ Invalid"
-
-                results.append({"email": mail, "status": status})
-
-                # Update progress bar
-                percent_complete = int(((i+1) / total) * 100)
-                progress.progress((i+1) / total)
-                status_text.text(f"Processing... {percent_complete}%")
-
-            # Convert to dataframe
-            result_df = pd.DataFrame(results)
-            st.success("✅ Validation Completed!")
-
-            st.dataframe(result_df)
-
-            # Download button
-            csv = result_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "📥 Download Results as CSV",
-                data=csv,
-                file_name="email_validation_results.csv",
-                mime="text/csv"
-            )
-
-    except Exception as e:
-        st.error(f"⚠️ Error: {e}")
+    # Download results
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("Download Results CSV", csv, "validated_emails.csv", "text/csv")
